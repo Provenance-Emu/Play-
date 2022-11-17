@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
 #import "VirtualPadItem.h"
 #include "PH_Generic.h"
 

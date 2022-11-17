@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
 #include "Types.h"
 
 @interface SettingsListSelectorViewController : UITableViewController

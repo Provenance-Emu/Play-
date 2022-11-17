@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
 #import "iCadeReaderView.h"
 #import "VirtualPadView.h"

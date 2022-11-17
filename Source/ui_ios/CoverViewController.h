@@ -6,7 +6,7 @@
 //  Copyright (c) 2015 Jean-Philip Desjardins. All rights reserved.
 //
 
-#import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
 #import "../ui_shared/BootablesDbClient.h"
 
 typedef std::vector<BootablesDb::Bootable> BootableArray;

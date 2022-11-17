@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
 #import "Playlist.h"
 #import "PlaylistDiscoveryService.h"
 #import "PlaylistSelectViewController.h"
