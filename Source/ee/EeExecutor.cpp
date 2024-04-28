@@ -60,7 +60,7 @@ void CEeExecutor::AddExceptionHandler()
 	sigemptyset(&sigAction.sa_mask);
 	int result = sigaction(SIGSEGV, &sigAction, nullptr);
 	assert(result >= 0);
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !TARGET_OS_TV
 	if(!m_running)
 	{
 		kern_return_t result = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &m_port);
@@ -93,7 +93,7 @@ void CEeExecutor::RemoveExceptionHandler()
 void CEeExecutor::AttachExceptionHandlerToThread()
 {
 	//Only necessary for macOS and iOS since the handler is set on a thread basis
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !TARGET_OS_TV
 	assert(m_running);
 
 	auto result = mach_port_insert_right(mach_task_self(), m_port, m_port, MACH_MSG_TYPE_MAKE_SEND);
@@ -250,7 +250,7 @@ void CEeExecutor::HandleExceptionInternal(int sigId, siginfo_t* sigInfo, void* b
 	signal(SIGSEGV, SIG_DFL);
 }
 
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !TARGET_OS_TV
 
 void CEeExecutor::HandlerThreadProc()
 {
