@@ -13,6 +13,9 @@ namespace GSH_Vulkan
 		void FlushVertices() override;
 		void FlushRenderPass() override;
 
+		// Public method to access the draw image for libretro integration
+		const Framework::Vulkan::CImage& GetDrawImage() const { return m_drawImage; }
+
 	private:
 		void CreateRenderPass();
 		void CreateFramebuffer();

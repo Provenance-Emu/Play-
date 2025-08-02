@@ -9,6 +9,7 @@ include(Header)
 project(Play_Libretro_Core)
 
 add_definitions(-DPLAY_VERSION="${PROJECT_Version}")
+add_definitions(-D__LIBRETRO__)
 
 if(NOT TARGET ui_shared)
 	add_subdirectory(
@@ -34,6 +35,17 @@ if(NOT TARGET gsh_opengl)
 endif()
 list(INSERT UI_LIBRETRO_PROJECT_LIBS 0 gsh_opengl)
 
+# Add Vulkan graphics handler for Apple platforms
+if(APPLE)
+	if(NOT TARGET gsh_vulkan)
+		add_subdirectory(
+			${CMAKE_CURRENT_SOURCE_DIR}/../gs/GSH_Vulkan
+			${CMAKE_CURRENT_BINARY_DIR}/gs/GSH_Vulkan
+		)
+	endif()
+	list(INSERT UI_LIBRETRO_PROJECT_LIBS 0 gsh_vulkan)
+endif()
+
 set(SRC
 	main_libretro.cpp
 	GSH_OpenGL_Libretro.cpp
@@ -43,6 +55,14 @@ set(SRC
 	SH_LibreAudio.cpp
 	SH_LibreAudio.h
 )
+
+# Add Vulkan support for Apple platforms
+if(APPLE)
+	list(APPEND SRC
+		GSH_Vulkan_Libretro.cpp
+		GSH_Vulkan_Libretro.h
+	)
+endif()
 
 if(TARGET_PLATFORM_ANDROID)
 	list(APPEND UI_LIBRETRO_PROJECT_LIBS android log GLESv3 EGL)

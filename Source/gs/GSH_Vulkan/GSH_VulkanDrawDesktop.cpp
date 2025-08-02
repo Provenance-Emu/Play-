@@ -45,8 +45,8 @@ void CDrawDesktop::CreateRenderPass()
 	VkAttachmentDescription colorAttachment = {};
 	colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
 	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // CRITICAL FIX: Clear framebuffer to eliminate pink
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Store results for copying to libretro
 	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
@@ -103,7 +103,7 @@ void CDrawDesktop::CreateDrawImage()
 	//that don't write to any color attachment
 
 	m_drawImage = Framework::Vulkan::CImage(m_context->device, m_context->physicalDeviceMemoryProperties,
-	                                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_FORMAT_R8G8B8A8_UNORM, DRAW_AREA_SIZE, DRAW_AREA_SIZE);
+	                                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_FORMAT_R8G8B8A8_UNORM, DRAW_AREA_SIZE, DRAW_AREA_SIZE);
 
 	m_drawImage.SetLayout(m_context->queue, m_context->commandBufferPool,
 	                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
@@ -949,6 +949,10 @@ Framework::Vulkan::CShaderModule CDrawDesktop::CreateFragmentShader(const PIPELI
 void CDrawDesktop::FlushVertices()
 {
 	uint32 vertexCount = m_passVertexEnd - m_passVertexStart;
+#ifdef __LIBRETRO__
+	static int flushCount = 0;
+	printf("[VULKAN DEBUG] FlushVertices called #%d, vertexCount=%d\n", ++flushCount, vertexCount);
+#endif
 	if(vertexCount == 0) return;
 
 	auto& frame = m_frames[m_frameCommandBuffer->GetCurrentFrame()];
@@ -998,6 +1002,13 @@ void CDrawDesktop::FlushVertices()
 		renderPassBeginInfo.renderArea.extent.width = DRAW_AREA_SIZE;
 		renderPassBeginInfo.renderArea.extent.height = DRAW_AREA_SIZE;
 		renderPassBeginInfo.framebuffer = m_framebuffer;
+		
+		// CRITICAL FIX: Add proper clear values to eliminate pink/magenta background
+		VkClearValue clearValue = {};
+		clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}}; // Clear to black instead of undefined/pink
+		renderPassBeginInfo.clearValueCount = 1;
+		renderPassBeginInfo.pClearValues = &clearValue;
+		
 		m_context->device.vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
 		m_renderPassBegun = true;
@@ -1054,6 +1065,10 @@ void CDrawDesktop::FlushVertices()
 	                                     0, sizeof(DRAW_PIPELINE_PUSHCONSTANTS), &m_pushConstants);
 
 	m_context->device.vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
+
+#ifdef __LIBRETRO__
+	printf("[VULKAN DEBUG] vkCmdDraw executed with %d vertices - should render to framebuffer!\n", vertexCount);
+#endif
 
 	m_passVertexStart = m_passVertexEnd;
 }

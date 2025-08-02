@@ -1,4 +1,15 @@
 #include "ext/libretro.h"
+#include "libretro_vulkan.h"
+
+// Define Vulkan libretro support based on build configuration
+#if defined(VULKAN_SUPPORTED) || defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
+#define VULKAN_LIBRETRO_SUPPORTED
+#endif
+
+// Include MoltenVK headers for iOS/macOS Vulkan support
+#ifdef __APPLE__
+#include <MoltenVK/vk_mvk_moltenvk.h>
+#endif
 
 #include "Log.h"
 #include "AppConfig.h"
@@ -7,6 +18,9 @@
 
 #include "PS2VM_Preferences.h"
 #include "GSH_OpenGL_Libretro.h"
+#ifdef __APPLE__
+#include "GSH_Vulkan_Libretro.h"
+#endif
 #include "SH_LibreAudio.h"
 #include "PH_Libretro_Input.h"
 
@@ -31,6 +45,7 @@ retro_environment_t g_environ_cb;
 retro_input_poll_t g_input_poll_cb;
 retro_input_state_t g_input_state_cb;
 retro_audio_sample_batch_t g_set_audio_sample_batch_cb;
+retro_log_printf_t g_log_cb = nullptr;
 
 std::map<int, int> g_ds2_to_retro_btn_map;
 struct retro_hw_render_callback g_hw_render
@@ -46,6 +61,9 @@ static std::vector<struct retro_variable> m_vars =
         {"play_res_multi", "Resolution Multiplier; 1x|2x|4x|8x"},
         {"play_presentation_mode", "Presentation Mode; Fit Screen|Fill Screen|Original Size"},
         {"play_bilinear_filtering", "Force Bilinear Filtering; false|true"},
+#ifdef __APPLE__
+        {"play_graphics_backend", "Graphics Backend; OpenGL ES|Vulkan"},
+#endif
         {NULL, NULL},
 };
 
@@ -74,19 +92,306 @@ unsigned retro_api_version()
 	return RETRO_API_VERSION;
 }
 
+// Forward declarations
+void SetupVideoHandler();
+static bool UseVulkanBackend();
+
+#ifdef __APPLE__
+// Vulkan context callbacks
+static void retro_vk_context_reset();
+static void retro_vk_context_destroy();
+
+// Vulkan negotiation interface functions
+static const VkApplicationInfo* retro_vulkan_get_application_info(void);
+static bool retro_vulkan_create_device(struct retro_vulkan_context *context,
+										   VkInstance instance,
+										   VkPhysicalDevice gpu,
+										   VkSurfaceKHR surface,
+										   PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+										   const char **required_device_extensions,
+										   unsigned num_required_device_extensions,
+										   const char **required_device_layers,
+										   unsigned num_required_device_layers,
+										   const VkPhysicalDeviceFeatures *required_features);
+static void retro_vulkan_destroy_device(void);
+
+// Hardware render context negotiation interface for Vulkan
+// This provides the complete interface that RetroArch expects
+static struct retro_hw_render_context_negotiation_interface_vulkan hw_render_negotiation = {
+	RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN,
+	RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION, // Use version 2
+	retro_vulkan_get_application_info,
+	retro_vulkan_create_device,
+	retro_vulkan_destroy_device,
+	nullptr, // create_instance (v2 only, we'll let frontend handle this)
+	nullptr  // create_device2 (v2 only, we'll use create_device instead)
+};
+
+// Vulkan context reset callback - this is where we get the hardware render interface
+static void retro_vk_context_reset()
+{
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[VULKAN] Context reset callback called\n");
+	}
+	CLog::GetInstance().Print(LOG_NAME, "Vulkan context reset callback\n");
+
+	// Get the libretro Vulkan interface - this is now available
+	retro_hw_render_interface* vulkan_interface = nullptr;
+	if (!g_environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, (void**)&vulkan_interface) || !vulkan_interface) {
+		if (g_log_cb) {
+			g_log_cb(RETRO_LOG_ERROR, "[VULKAN] Failed to get HW render interface in context reset\n");
+		}
+		CLog::GetInstance().Warn(LOG_NAME, "Failed to get HW render interface in context reset\n");
+		return;
+	}
+
+	if (vulkan_interface->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN) {
+		if (g_log_cb) {
+			g_log_cb(RETRO_LOG_ERROR, "[VULKAN] HW render interface is not Vulkan (type: %d)\n", vulkan_interface->interface_type);
+		}
+		CLog::GetInstance().Warn(LOG_NAME, "HW render interface is not Vulkan (type: %d)\n", vulkan_interface->interface_type);
+		return;
+	}
+
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[VULKAN] Successfully acquired Vulkan hardware render interface\n");
+	}
+	CLog::GetInstance().Print(LOG_NAME, "Successfully acquired Vulkan hardware render interface\n");
+
+	// Cast to the specific Vulkan interface
+	const struct retro_hw_render_interface_vulkan* vk_iface =
+		reinterpret_cast<const struct retro_hw_render_interface_vulkan*>(vulkan_interface);
+
+	// Initialize the Vulkan handler with the interface (if it exists)
+	if (m_virtualMachine && m_virtualMachine->GetGSHandler()) {
+		auto gsHandler = m_virtualMachine->GetGSHandler();
+		if (UseVulkanBackend()) {
+#ifdef VULKAN_LIBRETRO_SUPPORTED
+			auto vulkanHandler = static_cast<CGSH_Vulkan_Libretro*>(gsHandler);
+			try {
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_INFO, "[VULKAN] Initializing existing Vulkan handler with interface\n");
+				}
+				vulkanHandler->InitializeWithInterface(vk_iface);
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_INFO, "[VULKAN] Vulkan handler initialized successfully in context reset\n");
+				}
+			} catch (const std::exception& ex) {
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_ERROR, "[VULKAN] Failed to initialize Vulkan handler with interface: %s\n", ex.what());
+				}
+				CLog::GetInstance().Warn(LOG_NAME, "Failed to initialize Vulkan handler with interface: %s\n", ex.what());
+			}
+#else
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_WARN, "[VULKAN] Vulkan libretro support not compiled in, falling back to OpenGL\n");
+			}
+#endif
+		}
+	} else {
+		// Create the video handler if it doesn't exist yet
+		SetupVideoHandler();
+
+		// Then initialize it with the interface
+		if (m_virtualMachine && m_virtualMachine->GetGSHandler() && UseVulkanBackend()) {
+#ifdef VULKAN_LIBRETRO_SUPPORTED
+			auto vulkanHandler = static_cast<CGSH_Vulkan_Libretro*>(m_virtualMachine->GetGSHandler());
+			try {
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_INFO, "[VULKAN] Initializing new Vulkan handler with interface\n");
+				}
+				vulkanHandler->InitializeWithInterface(vk_iface);
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_INFO, "[VULKAN] New Vulkan handler initialized successfully in context reset\n");
+				}
+			} catch (const std::exception& ex) {
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_ERROR, "[VULKAN] Failed to initialize new Vulkan handler with interface: %s\n", ex.what());
+				}
+				CLog::GetInstance().Warn(LOG_NAME, "Failed to initialize new Vulkan handler with interface: %s\n", ex.what());
+			}
+#else
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_WARN, "[VULKAN] Vulkan libretro support not compiled in, falling back to OpenGL\n");
+			}
+#endif
+		}
+	}
+}
+
+// Vulkan context destroy callback
+static void retro_vk_context_destroy()
+{
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[VULKAN] Context destroy callback called\n");
+	}
+	CLog::GetInstance().Print(LOG_NAME, "Vulkan context destroy callback\n");
+
+	// Clean up Vulkan resources
+	if (m_virtualMachine && m_virtualMachine->GetGSHandler()) {
+		auto gsHandler = m_virtualMachine->GetGSHandler();
+		gsHandler->Release();
+	}
+}
+
+// Vulkan negotiation interface function implementations
+static const VkApplicationInfo* retro_vulkan_get_application_info(void)
+{
+	// Static VkApplicationInfo that RetroArch will use for Vulkan instance creation
+	static const VkApplicationInfo app_info = {
+		VK_STRUCTURE_TYPE_APPLICATION_INFO,
+		nullptr, // pNext
+		"Play! PS2 Emulator", // pApplicationName
+		VK_MAKE_VERSION(1, 0, 0), // applicationVersion
+		"libretro", // pEngineName
+		VK_MAKE_VERSION(1, 0, 0), // engineVersion
+		VK_API_VERSION_1_1 // apiVersion - use 1.1 for optimal iOS/Android compatibility
+	};
+	
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[VULKAN] Providing application info: Play! PS2 Emulator, Vulkan 1.1\n");
+	}
+	CLog::GetInstance().Print(LOG_NAME, "Providing Vulkan application info\n");
+	
+	return &app_info;
+}
+
+static bool retro_vulkan_create_device(struct retro_vulkan_context *context,
+										   VkInstance instance,
+										   VkPhysicalDevice gpu,
+										   VkSurfaceKHR surface,
+										   PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+										   const char **required_device_extensions,
+										   unsigned num_required_device_extensions,
+										   const char **required_device_layers,
+										   unsigned num_required_device_layers,
+										   const VkPhysicalDeviceFeatures *required_features)
+{
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[VULKAN] create_device called - letting frontend handle device creation\n");
+	}
+	CLog::GetInstance().Print(LOG_NAME, "Vulkan create_device called - using frontend default\n");
+	
+	// Return false to let the frontend handle device creation with its defaults
+	// This is the recommended approach for most libretro cores
+	// The frontend will create a suitable device and provide it via the hardware render interface
+	return false;
+}
+
+static void retro_vulkan_destroy_device(void)
+{
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[VULKAN] destroy_device called\n");
+	}
+	CLog::GetInstance().Print(LOG_NAME, "Vulkan destroy_device called\n");
+	
+	// Nothing to clean up since we let the frontend handle device creation
+	// Any core-specific Vulkan resources are cleaned up in retro_vk_context_destroy
+}
+
+#endif
+
+static bool UseVulkanBackend()
+{
+	struct retro_variable var = {"play_graphics_backend", nullptr};
+	bool get_result = g_environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var);
+	
+	// Debug logging
+	CLog::GetInstance().Print(LOG_NAME, "[DEBUG] UseVulkanBackend: GET_VARIABLE result=%s, value=%s\n", 
+		get_result ? "SUCCESS" : "FAILED", var.value ? var.value : "NULL");
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_DEBUG, "[DEBUG] UseVulkanBackend: GET_VARIABLE result=%s, value=%s\n", 
+			get_result ? "SUCCESS" : "FAILED", var.value ? var.value : "NULL");
+	}
+	
+	if(get_result && var.value)
+	{
+		bool is_vulkan = strcmp(var.value, "Vulkan") == 0;
+		CLog::GetInstance().Print(LOG_NAME, "[DEBUG] UseVulkanBackend: Comparing '%s' with 'Vulkan' = %s\n", 
+			var.value, is_vulkan ? "TRUE" : "FALSE");
+		return is_vulkan;
+	}
+	CLog::GetInstance().Print(LOG_NAME, "[DEBUG] UseVulkanBackend: Defaulting to OpenGL\n");
+	return false; // Default to OpenGL
+}
+
 void SetupVideoHandler()
 {
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[SETUP] SetupVideoHandler called\n");
+	}
 	CLog::GetInstance().Print(LOG_NAME, "%s\n", __FUNCTION__);
 
 	auto gsHandler = m_virtualMachine->GetGSHandler();
 	if(!gsHandler)
 	{
-		m_virtualMachine->CreateGSHandler(CGSH_OpenGL_Libretro::GetFactoryFunction());
+#ifdef __APPLE__
+		if(UseVulkanBackend())
+		{
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_INFO, "[SETUP] Creating Vulkan graphics handler\n");
+			}
+			CLog::GetInstance().Print(LOG_NAME, "Creating Vulkan graphics handler\n");
+			try {
+				m_virtualMachine->CreateGSHandler(CGSH_Vulkan_Libretro::GetFactoryFunction());
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_INFO, "[SETUP] Vulkan graphics handler created successfully\n");
+				}
+			} catch (const std::exception& ex) {
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_ERROR, "[SETUP] Vulkan graphics handler creation failed: %s\n", ex.what());
+				}
+				CLog::GetInstance().Warn(LOG_NAME, "Vulkan graphics handler creation failed: %s\n", ex.what());
+				// Fall back to OpenGL
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_WARN, "[SETUP] Falling back to OpenGL graphics handler\n");
+				}
+				m_virtualMachine->CreateGSHandler(CGSH_OpenGL_Libretro::GetFactoryFunction());
+			}
+		}
+		else
+#endif
+		{
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_INFO, "[SETUP] Creating OpenGL graphics handler\n");
+			}
+			CLog::GetInstance().Print(LOG_NAME, "Creating OpenGL graphics handler\n");
+			m_virtualMachine->CreateGSHandler(CGSH_OpenGL_Libretro::GetFactoryFunction());
+		}
 	}
 	else
 	{
-		auto retro_gs = static_cast<CGSH_OpenGL_Libretro*>(gsHandler);
-		retro_gs->Reset();
+#ifdef __APPLE__
+		if(UseVulkanBackend())
+		{
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_INFO, "[SETUP] Resetting existing Vulkan graphics handler\n");
+			}
+			auto retro_gs = static_cast<CGSH_Vulkan_Libretro*>(gsHandler);
+			try {
+				retro_gs->Reset();
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_INFO, "[SETUP] Vulkan graphics handler reset successfully\n");
+				}
+			} catch (const std::exception& ex) {
+				if (g_log_cb) {
+					g_log_cb(RETRO_LOG_ERROR, "[SETUP] Vulkan graphics handler reset failed: %s\n", ex.what());
+				}
+				CLog::GetInstance().Warn(LOG_NAME, "Vulkan graphics handler reset failed: %s\n", ex.what());
+			}
+		}
+		else
+#endif
+		{
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_INFO, "[SETUP] Resetting existing OpenGL graphics handler\n");
+			}
+			auto retro_gs = static_cast<CGSH_OpenGL_Libretro*>(gsHandler);
+			retro_gs->Reset();
+		}
+	}
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[SETUP] SetupVideoHandler completed\n");
 	}
 }
 
@@ -186,11 +491,13 @@ void retro_get_system_av_info(struct retro_system_av_info* info)
 	*info = {};
 	info->timing.fps = 60.0;
 	info->timing.sample_rate = 44100;
-	info->geometry.base_width = 640;
-	info->geometry.base_height = 448;
-	info->geometry.max_width = 640 * 8;
-	info->geometry.max_height = 448 * 8;
-	info->geometry.aspect_ratio = 4.0 / 3.0;
+	// SCALING FIX: Report actual image dimensions to prevent squishing
+	// We're using 1024x1024 images to match Play!'s DRAW_AREA_SIZE
+	info->geometry.base_width = 1024;
+	info->geometry.base_height = 1024;
+	info->geometry.max_width = 1024;
+	info->geometry.max_height = 1024;
+	info->geometry.aspect_ratio = 1.0; // Square aspect ratio for 1024x1024
 }
 
 void retro_set_video_refresh(retro_video_refresh_t cb)
@@ -202,6 +509,23 @@ void retro_set_video_refresh(retro_video_refresh_t cb)
 void retro_set_environment(retro_environment_t cb)
 {
 	g_environ_cb = cb;
+
+	// Set up libretro logging interface
+	struct retro_log_callback log_cb;
+	if (g_environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log_cb))
+	{
+		g_log_cb = log_cb.log;
+	}
+
+	// Register core options early - this MUST be done in retro_set_environment()
+	// according to libretro standards, not in retro_load_game()
+	bool options_result = g_environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)m_vars.data());
+
+	// Debug: Always log this, even without g_log_cb
+	CLog::GetInstance().Print(LOG_NAME, "[ENV] Core options registration attempted, result: %s\n", options_result ? "SUCCESS" : "FAILED");
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[ENV] Core options registered in retro_set_environment, result: %s\n", options_result ? "SUCCESS" : "FAILED");
+	}
 }
 
 void retro_set_input_poll(retro_input_poll_t cb)
@@ -508,16 +832,59 @@ bool retro_load_game(const retro_game_info* info)
 	auto rgb = RETRO_PIXEL_FORMAT_XRGB8888;
 	g_environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &rgb);
 
-#ifdef GLES_COMPATIBILITY
-	g_hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
-#else
-	g_hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
-#endif
+	// Debug: Check if we're on Apple platform and using Vulkan
+	if (g_log_cb) {
+		g_log_cb(RETRO_LOG_INFO, "[LOAD] Platform check: __APPLE__ defined, UseVulkanBackend() = %s\n", UseVulkanBackend() ? "true" : "false");
+	}
+	CLog::GetInstance().Print(LOG_NAME, "Platform check: __APPLE__ defined, UseVulkanBackend() = %s\n", UseVulkanBackend() ? "true" : "false");
 
-	g_hw_render.version_major = 3;
-	g_hw_render.version_minor = 2;
-	g_hw_render.context_reset = retro_context_reset;
-	g_hw_render.context_destroy = retro_context_destroy;
+#ifdef __APPLE__
+	if(UseVulkanBackend())
+	{
+		if (g_log_cb) {
+			g_log_cb(RETRO_LOG_INFO, "[LOAD] Setting up Vulkan hardware render with negotiation interface\n");
+		}
+		CLog::GetInstance().Print(LOG_NAME, "Setting up Vulkan hardware render with negotiation interface\n");
+		
+		// CRITICAL: Set up the hardware render context negotiation interface FIRST
+		// This tells RetroArch we want Vulkan, not OpenGL
+		if (!g_environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, (void*)&hw_render_negotiation)) {
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_WARN, "[LOAD] Failed to set Vulkan negotiation interface, falling back to OpenGL\n");
+			}
+			// Fall back to OpenGL if negotiation fails
+			goto setup_opengl;
+		}
+		
+		// Set up Vulkan hardware render context
+		g_hw_render.context_type = RETRO_HW_CONTEXT_VULKAN;
+		g_hw_render.version_major = VK_API_VERSION_1_0;
+		g_hw_render.version_minor = 0;
+		// Set Vulkan-specific callbacks
+		g_hw_render.context_reset = retro_vk_context_reset;
+		g_hw_render.context_destroy = retro_vk_context_destroy;
+		
+		if (g_log_cb) {
+			g_log_cb(RETRO_LOG_INFO, "[LOAD] Vulkan hardware render setup complete\n");
+		}
+		CLog::GetInstance().Print(LOG_NAME, "Vulkan hardware render setup complete\n");
+	}
+	else
+#endif
+	{
+setup_opengl:
+		CLog::GetInstance().Print(LOG_NAME, "Setting up OpenGL context\n");
+#ifdef GLES_COMPATIBILITY
+		g_hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
+#else
+		g_hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
+#endif
+		g_hw_render.version_major = 3;
+		g_hw_render.version_minor = 2;
+		// Set OpenGL callbacks only for OpenGL backend
+		g_hw_render.context_reset = retro_context_reset;
+		g_hw_render.context_destroy = retro_context_destroy;
+	}
 	g_hw_render.cache_context = false;
 	g_hw_render.bottom_left_origin = true;
 	g_hw_render.depth = true;
@@ -527,7 +894,8 @@ bool retro_load_game(const retro_game_info* info)
 
 	g_environ_cb(RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT, nullptr);
 
-	g_environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)m_vars.data());
+	// Core options are now registered in retro_set_environment() where they belong
+	// according to libretro standards
 
 	return true;
 }

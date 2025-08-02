@@ -52,6 +52,13 @@ CGSH_Vulkan::CGSH_Vulkan()
 	m_context = std::make_shared<CContext>();
 }
 
+// Protected constructor for libretro to specify threading mode
+CGSH_Vulkan::CGSH_Vulkan(bool gsThreaded)
+	: CGSHandler(gsThreaded)
+{
+	m_context = std::make_shared<CContext>();
+}
+
 Framework::Vulkan::CInstance CGSH_Vulkan::CreateInstance(bool useValidationLayers)
 {
 	auto instanceCreateInfo = Framework::Vulkan::InstanceCreateInfo();
@@ -122,6 +129,10 @@ Framework::Vulkan::CInstance CGSH_Vulkan::CreateInstance(bool useValidationLayer
 
 void CGSH_Vulkan::InitializeImpl()
 {
+	// Create Vulkan instance if not already created (normal mode)
+	if (m_instance.IsEmpty()) {
+		m_instance = CreateInstance(false);
+	}
 	assert(!m_instance.IsEmpty());
 	m_context->instance = &m_instance;
 
@@ -160,9 +171,15 @@ void CGSH_Vulkan::InitializeImpl()
 		m_context->surfaceFormat = surfaceFormats[surfaceFormatIndex];
 	}
 
-	CreateDevice(m_context->physicalDevice);
-	m_context->device.vkGetDeviceQueue(m_context->device, renderQueueFamily, 0, &m_context->queue);
-	m_context->commandBufferPool = Framework::Vulkan::CCommandBufferPool(m_context->device, renderQueueFamily);
+	// In libretro mode, RetroArch provides the Vulkan device - skip device creation
+	if (!IsLibretroMode()) {
+		CreateDevice(m_context->physicalDevice);
+		m_context->device.vkGetDeviceQueue(m_context->device, renderQueueFamily, 0, &m_context->queue);
+		m_context->commandBufferPool = Framework::Vulkan::CCommandBufferPool(m_context->device, renderQueueFamily);
+	} else {
+		// In libretro mode, the device and queue will be set up by the libretro handler
+		// Skip device creation and let the libretro integration handle Vulkan context setup
+	}
 
 	CreateDescriptorPool();
 	CreateMemoryBuffer();
@@ -564,6 +581,19 @@ void CGSH_Vulkan::CreateDescriptorPool()
 
 void CGSH_Vulkan::CreateMemoryBuffer()
 {
+	// In libretro mode, cleanup any existing buffer before creating a new one
+	if(!m_context->memoryBuffer.IsEmpty())
+	{
+		m_context->memoryBuffer.Reset();
+		m_context->memoryBufferCopy.Reset();
+		m_context->memoryBufferTransfer.Reset();
+	}
+	if(m_memoryCache)
+	{
+		delete[] m_memoryCache;
+		m_memoryCache = nullptr;
+	}
+	
 	assert(m_context->memoryBuffer.IsEmpty());
 	assert(!m_memoryCache);
 
@@ -597,6 +627,12 @@ void CGSH_Vulkan::CreateMemoryBuffer()
 
 void CGSH_Vulkan::CreateClutBuffer()
 {
+	// In libretro mode, cleanup any existing CLUT buffer before creating a new one
+	if(!m_context->clutBuffer.IsEmpty())
+	{
+		m_context->clutBuffer.Reset();
+	}
+	
 	assert(m_context->clutBuffer.IsEmpty());
 
 	static const uint32 clutBufferSize = CLUTENTRYCOUNT * sizeof(uint32) * CLUT_CACHE_SIZE;
@@ -638,6 +674,13 @@ void CGSH_Vulkan::ProcessPrim(uint64 data)
 
 void CGSH_Vulkan::VertexKick(uint8 registerId, uint64 data)
 {
+#ifdef __LIBRETRO__
+	static int vertexKickCount = 0;
+	if(++vertexKickCount % 1000 == 0) {
+		printf("[VULKAN DEBUG] VertexKick called %d times, registerId=0x%02X\n", vertexKickCount, registerId);
+	}
+#endif
+
 	if(m_pendingPrim)
 	{
 		m_pendingPrim = false;

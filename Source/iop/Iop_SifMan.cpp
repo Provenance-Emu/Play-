@@ -125,7 +125,16 @@ uint32 CSifMan::SifSetDma(uint32 structAddr, uint32 count)
 	//arrive so quickly
 	//Call of Cthulhu: Destiny's End is also sensitive to timings.
 	uint32 transferIdx = m_moduleData->nextDmaTransferIdx;
+#ifdef __LIBRETRO__
+	// In libretro/interpreter mode, timing can be inconsistent - clear the slot if needed
+	if (m_moduleData->dmaTransferTimes[transferIdx] != 0) {
+		CLog::GetInstance().Print(LOG_NAME, "[LIBRETRO] Clearing stuck DMA transfer slot %d (was %d)\n", 
+		                          transferIdx, m_moduleData->dmaTransferTimes[transferIdx]);
+		m_moduleData->dmaTransferTimes[transferIdx] = 0;
+	}
+#else
 	assert(m_moduleData->dmaTransferTimes[transferIdx] == 0);
+#endif
 	m_moduleData->dmaTransferTimes[transferIdx] = 0x400;
 	m_moduleData->nextDmaTransferIdx = (m_moduleData->nextDmaTransferIdx + 1) % DMA_TRANSFER_TIMES_SIZE;
 

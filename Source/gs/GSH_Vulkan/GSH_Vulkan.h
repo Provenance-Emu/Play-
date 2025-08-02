@@ -26,6 +26,17 @@ public:
 
 	static Framework::Vulkan::CInstance CreateInstance(bool);
 
+protected:
+	// Protected constructor for libretro to specify threading mode
+	CGSH_Vulkan(bool gsThreaded);
+
+	// Protected getter for libretro to access draw system
+	GSH_Vulkan::DrawPtr GetDrawSystem() const { return m_draw; }
+
+	// Virtual method to detect libretro mode - override in libretro handler
+	virtual bool IsLibretroMode() const { return false; }
+
+public:
 	void SetPresentationParams(const CGSHandler::PRESENTATION_PARAMS&) override;
 
 	void ProcessHostToLocalTransfer() override;

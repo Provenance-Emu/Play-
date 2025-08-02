@@ -24,6 +24,11 @@ EXTRA_CFLAGS="${EXTRA_CFLAGS:-}"
 EXTRA_CXXFLAGS="${EXTRA_CXXFLAGS:-}"
 EXTRA_LDFLAGS="${EXTRA_LDFLAGS:-}"
 
+# iOS/tvOS 15+ optimizations
+CFLAGS_OPTIMIZATIONS=""
+
+CXXFLAGS_OPTIMIZATIONS=${CFLAGS_OPTIMIZATIONS}
+
 # iOS/tvOS deployment targets
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.4}"
 TVOS_DEPLOYMENT_TARGET="${TVOS_DEPLOYMENT_TARGET:-16.4}"
@@ -264,6 +269,9 @@ configure_cmake() {
     fi
 
     # Add extra compiler flags
+    CMAKE_ARGS+=("-DCMAKE_C_FLAGS=$CFLAGS_OPTIMIZATIONS")
+    CMAKE_ARGS+=("-DCMAKE_CXX_FLAGS=$CXXFLAGS_OPTIMIZATIONS")
+
     if [[ -n "$EXTRA_CFLAGS" ]]; then
         CMAKE_ARGS+=("-DCMAKE_C_FLAGS=$EXTRA_CFLAGS")
     fi
@@ -309,6 +317,8 @@ configure_cmake() {
         "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO"
         "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO"
         "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=\"\""
+        "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_STYLE=Manual"
+        "-DCMAKE_XCODE_ATTRIBUTE_SKIP_INSTALL=YES"
     )
 
     log_info "CMake configuration:"
@@ -326,14 +336,17 @@ build_project() {
     if [[ $? -eq 0 ]]; then
         log_success "Build completed successfully!"
 
-        # Find the built dylib
+        # Find the built dylib in the correct configuration directory
         if [[ "$PLATFORM" == "tvOS" ]]; then
             DYLIB_PATTERN="*play_libretro*tvos.dylib"
         else
             DYLIB_PATTERN="*play_libretro*ios.dylib"
         fi
 
-        BUILT_DYLIB=$(find . -name "$DYLIB_PATTERN" -type f | head -1)
+        # Look specifically in the configuration directory (Debug-iphoneos or Release-iphoneos)
+        # Exclude dSYM files to find the actual dylib
+        CONFIG_DIR="$CONFIGURATION-iphoneos"
+        BUILT_DYLIB=$(find . -path "*/$CONFIG_DIR/*" -name "$DYLIB_PATTERN" -not -path "*.dSYM/*" -type f | head -1)
 
         if [[ -n "$BUILT_DYLIB" ]]; then
             log_success "Built dylib: $BUILT_DYLIB"
@@ -341,6 +354,19 @@ build_project() {
             # Copy to project root for convenience
             OUTPUT_NAME="play_libretro_${PLATFORM,,}.dylib"
             cp "$BUILT_DYLIB" "../$OUTPUT_NAME"
+
+            # Strip any signatures and clean extended attributes to prevent framework issues
+            log_info "Cleaning dylib signatures and attributes..."
+            codesign --remove-signature "../$OUTPUT_NAME" 2>/dev/null || true
+            xattr -c "../$OUTPUT_NAME" 2>/dev/null || true
+
+            # Verify the dylib is unsigned
+            if codesign -dv "../$OUTPUT_NAME" 2>&1 | grep -q "not signed"; then
+                log_info "Dylib is properly unsigned"
+            else
+                log_warning "Dylib may still have signature remnants"
+            fi
+
             log_success "Copied to: $PROJECT_ROOT/$OUTPUT_NAME"
 
             # Show file info
