@@ -23,12 +23,18 @@ public:
 	void Reset();
 	void FlushMailBox();
 	
+	// PAUSE CRASH FIX: Pause/resume methods to prevent MoltenVK crashes
+	void SetPaused(bool paused) { m_is_paused = paused; }
+	bool IsPaused() const { return m_is_paused; }
+	
 protected:
 	// Override to indicate this is libretro mode
 	bool IsLibretroMode() const override { return true; }
 
 	// Following iOS pattern: Override only what's necessary for libretro
 	void PresentBackbuffer() override;
+	// FLICKER FIX: Overloaded version that takes sync_index to eliminate race conditions
+	void PresentBackbuffer(uint32_t sync_index);
 	void FlipImpl(const DISPLAY_INFO& displayInfo) override;
 	void SetPresentationParams(const CGSHandler::PRESENTATION_PARAMS& presentationParams) override;
 	void MarkNewFrame() override;
@@ -38,6 +44,13 @@ private:
 
 	// Store libretro Vulkan interface
 	const struct retro_hw_render_interface_vulkan* m_vk_iface = nullptr;
+	
+	// PAUSE CRASH FIX: Track pause state to prevent MoltenVK crashes
+	bool m_is_paused;
+    
+    // SHADER MIXING FIX: Separate command buffer pool for libretro operations
+    // This prevents interference with Play!'s active rendering pipeline
+    VkCommandPool m_libretro_command_pool = VK_NULL_HANDLE;
     
     // Libretro image management
     std::map<uint32_t, VkImage> m_libretro_images;
@@ -49,4 +62,9 @@ private:
     VkImageView GetLibretroImageView(uint32_t sync_index);
     void CopyPlayDrawImageToLibretro(VkImage dst_image, uint32_t sync_index);
     void CleanupLibretroImages();
+    
+    // SHADER MIXING FIX: Command pool management for isolated operations
+    void CreateLibretroCommandPool();
+    void CleanupLibretroCommandPool();
+    VkCommandBuffer AllocateLibretroCommandBuffer();
 };

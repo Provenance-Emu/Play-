@@ -4,6 +4,7 @@
 #include "vulkan/Loader.h"
 #include "Log.h"
 #include <map>
+#include <thread>
 
 #define LOG_NAME "libretro_vulkan"
 
@@ -16,14 +17,19 @@ extern retro_log_printf_t g_log_cb;
 
 CGSH_Vulkan_Libretro::CGSH_Vulkan_Libretro()
 	: CGSH_Vulkan(false)  // Use protected constructor with gsThreaded=false for single-threaded libretro mode
+	, m_is_paused(false)  // Initialize pause state
 {
 	// Threading is now properly set via base constructor
 }
 
 CGSH_Vulkan_Libretro::~CGSH_Vulkan_Libretro()
 {
-    g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Vulkan libretro destructor called\n");
+    g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] CGSH_Vulkan_Libretro destructor called\n");
+    
     CleanupLibretroImages();
+    CleanupLibretroCommandPool();  // SHADER MIXING FIX: Clean up our separate command pool
+    
+    g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] CGSH_Vulkan_Libretro destructor completed\n");
 }
 
 CGSHandler::FactoryFunction CGSH_Vulkan_Libretro::GetFactoryFunction()
@@ -129,16 +135,34 @@ void CGSH_Vulkan_Libretro::FlushMailBox()
 
 void CGSH_Vulkan_Libretro::PresentBackbuffer()
 {
-    g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] PresentBackbuffer called\n");
+    // FLICKER FIX: Original override gets sync_index and calls the new version
+    if (!m_vk_iface) {
+        g_log_cb(RETRO_LOG_ERROR, "[libretro ERROR] Vulkan interface not available\n");
+        return;
+    }
+    
+    uint32_t sync_index = m_vk_iface->get_sync_index(m_vk_iface->handle);
+    PresentBackbuffer(sync_index);
+}
+
+void CGSH_Vulkan_Libretro::PresentBackbuffer(uint32_t sync_index)
+{
+    g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] PresentBackbuffer called with sync_index: %u\n", sync_index);
+    
+    // PAUSE CRASH FIX: Don't present if paused to avoid MoltenVK descriptor binding crashes
+    if (m_is_paused) {
+        g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Skipping PresentBackbuffer - core is paused\n");
+        return;
+    }
     
     if (!m_vk_iface) {
         g_log_cb(RETRO_LOG_ERROR, "[libretro ERROR] Vulkan interface not available\n");
         return;
     }
     
-    // Get current sync index from RetroArch
-    uint32_t sync_index = m_vk_iface->get_sync_index(m_vk_iface->handle);
-    g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Sync index: %u\n", sync_index);
+    // FLICKER FIX: Use the provided sync_index instead of getting it again
+    // This ensures we present the exact same image we just copied to
+    g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Using provided sync index: %u\n", sync_index);
     
     // Get the image that was already copied in FlipImpl()
     VkImage libretro_image = GetOrCreateLibretroImage(sync_index);
@@ -154,7 +178,7 @@ void CGSH_Vulkan_Libretro::PresentBackbuffer()
     vk_image.create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vk_image.create_info.image = libretro_image;
     vk_image.create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vk_image.create_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    vk_image.create_info.format = VK_FORMAT_B8G8R8A8_UNORM;  // Match GLES UNORM format
     vk_image.create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vk_image.create_info.subresourceRange.baseMipLevel = 0;
     vk_image.create_info.subresourceRange.levelCount = 1;
@@ -164,9 +188,12 @@ void CGSH_Vulkan_Libretro::PresentBackbuffer()
     // Provide the image to RetroArch
     m_vk_iface->set_image(m_vk_iface->handle, &vk_image, 0, nullptr, VK_QUEUE_FAMILY_IGNORED);
     
-    // FLICKER FIX: Use larger resolution for better visibility and stability
-    // This matches our VkImage size and reduces scaling artifacts
-    g_video_cb(RETRO_HW_FRAME_BUFFER_VALID, 1024, 768, 0);
+    // GLES PATTERN FIX: Use dynamic CRT resolution like GLES libretro does
+    // This ensures proper resolution matching between frontend and backend
+    extern int g_res_factor;
+    uint32_t crt_width = GetCrtWidth() * g_res_factor;
+    uint32_t crt_height = GetCrtHeight() * g_res_factor;
+    g_video_cb(RETRO_HW_FRAME_BUFFER_VALID, crt_width, crt_height, 0);
     
     g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Frame presented to RetroArch\n");
 }
@@ -184,18 +211,25 @@ void CGSH_Vulkan_Libretro::FlipImpl(const DISPLAY_INFO& displayInfo)
     // Call base CGSHandler::FlipImpl for basic flip logic (sets m_flipped = true)
     CGSHandler::FlipImpl(displayInfo);
     
-    // CRITICAL FIX: Copy the image RIGHT AFTER rendering is complete, BEFORE presentation
-    // This ensures we capture the actual rendered content before it gets cleared
+    // GLES PATTERN FIX: Simple GPU sync like GLES libretro does
+    // Just ensure rendering is complete before copying, no complex timing
+    if (m_context && m_context->queue) {
+        // Wait for GPU work to complete - matches GLES pattern
+        m_context->device.vkQueueWaitIdle(m_context->queue);
+        g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] GPU sync completed - ready to copy\n");
+    }
+    
+    // FLICKER FIX: Get sync index once and use it consistently for both copy and present
+    // This eliminates the race condition that causes flickering
     if (m_vk_iface && m_vk_iface->handle) {
         uint32_t sync_index = m_vk_iface->get_sync_index(m_vk_iface->handle);
         VkImage libretro_image = GetOrCreateLibretroImage(sync_index);
         if (libretro_image != VK_NULL_HANDLE) {
             CopyPlayDrawImageToLibretro(libretro_image, sync_index);
+            // FLICKER FIX: Pass the same sync_index to PresentBackbuffer
+            PresentBackbuffer(sync_index);
         }
     }
-    
-    // Now call PresentBackbuffer to notify frontend
-    PresentBackbuffer();
 }
 
 void CGSH_Vulkan_Libretro::SetPresentationParams(const CGSHandler::PRESENTATION_PARAMS& presentationParams)
@@ -232,9 +266,15 @@ VkImage CGSH_Vulkan_Libretro::GetOrCreateLibretroImage(uint32_t sync_index)
     VkImageCreateInfo image_info = {};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
-    image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
-    image_info.extent.width = 1024;  // FLICKER FIX: Use larger resolution for better visibility
-    image_info.extent.height = 768;  // This matches our reported resolution to RetroArch
+    // GLES PATTERN FIX: Use dynamic CRT resolution like GLES libretro does
+    // This matches the proven GLES approach for proper resolution handling
+    extern int g_res_factor;
+    uint32_t crt_width = GetCrtWidth() * g_res_factor;
+    uint32_t crt_height = GetCrtHeight() * g_res_factor;
+    
+    image_info.format = VK_FORMAT_B8G8R8A8_UNORM;  // Back to UNORM like GLES for compatibility
+    image_info.extent.width = crt_width;   // Dynamic resolution like GLES
+    image_info.extent.height = crt_height; // Dynamic resolution like GLES
     image_info.extent.depth = 1;
     image_info.mipLevels = 1;
     image_info.arrayLayers = 1;
@@ -330,7 +370,13 @@ void CGSH_Vulkan_Libretro::CopyPlayDrawImageToLibretro(VkImage dst_image, uint32
 {
     RETRO_LOG(RETRO_LOG_INFO, "=== CopyPlayDrawImageToLibretro called, sync_index=%u ===\n", sync_index);
     
-    // Try to get Play!'s draw image and copy it to the libretro image
+    // PAUSE CRASH FIX: Don't copy images if paused to avoid MoltenVK crashes
+    if (m_is_paused) {
+        RETRO_LOG(RETRO_LOG_DEBUG, "Skipping image copy - core is paused\n");
+        return;
+    }
+    
+    // ANTI-FLICKER FIX: Always copy actual game content, but add stability measures
     VkImage src_image = VK_NULL_HANDLE;
     bool has_source_image = false;
     
@@ -364,8 +410,13 @@ void CGSH_Vulkan_Libretro::CopyPlayDrawImageToLibretro(VkImage dst_image, uint32
         RETRO_LOG(RETRO_LOG_INFO, "No draw system available\n");
     }
     
-    // Get a command buffer for the copy operation
-    VkCommandBuffer cmd_buffer = m_context->commandBufferPool.AllocateBuffer();
+    // SHADER MIXING FIX: Use separate command buffer pool for libretro operations
+    // This prevents interference with Play!'s active rendering pipeline
+    VkCommandBuffer cmd_buffer = AllocateLibretroCommandBuffer();
+    if (cmd_buffer == VK_NULL_HANDLE) {
+        RETRO_LOG(RETRO_LOG_ERROR, "Failed to allocate libretro command buffer\n");
+        return;
+    }
     
     // Begin the command buffer
     VkCommandBufferBeginInfo begin_info = {};
@@ -431,7 +482,12 @@ void CGSH_Vulkan_Libretro::CopyPlayDrawImageToLibretro(VkImage dst_image, uint32
             0, 0, nullptr, 0, nullptr, 1, &src_barrier
         );
         
-        // Copy the image
+        // GLES PATTERN FIX: Use simple copy like GLES, not complex scaling
+        // This matches the proven GLES approach for stable video output
+        extern int g_res_factor;
+        uint32_t crt_width = GetCrtWidth() * g_res_factor;
+        uint32_t crt_height = GetCrtHeight() * g_res_factor;
+        
         VkImageCopy copy_region = {};
         copy_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         copy_region.srcSubresource.mipLevel = 0;
@@ -443,7 +499,9 @@ void CGSH_Vulkan_Libretro::CopyPlayDrawImageToLibretro(VkImage dst_image, uint32
         copy_region.dstSubresource.baseArrayLayer = 0;
         copy_region.dstSubresource.layerCount = 1;
         copy_region.dstOffset = {0, 0, 0};
-        copy_region.extent = {1024, 768, 1}; // FLICKER FIX: Extract 1024x768 region for proper aspect ratio
+        copy_region.extent = {crt_width, crt_height, 1}; // Dynamic resolution like GLES
+        
+        RETRO_LOG(RETRO_LOG_INFO, "GLES PATTERN: Copying from Play! draw image to %ux%u\n", crt_width, crt_height);
         
         m_context->device.vkCmdCopyImage(
             cmd_buffer,
@@ -466,23 +524,10 @@ void CGSH_Vulkan_Libretro::CopyPlayDrawImageToLibretro(VkImage dst_image, uint32
         );
         
     } else {
-        // Fall back to test pattern if we can't access Play!'s draw image
-        RETRO_LOG(RETRO_LOG_INFO, "TAKING FALLBACK PATH: Using test pattern fallback\n");
+        // ANTI-FLICKER FIX: Instead of test pattern, clear to black for stable output
+        RETRO_LOG(RETRO_LOG_INFO, "TAKING FALLBACK PATH: Using stable black clear\n");
         
-        VkClearColorValue clear_color;
-        
-        // Create a simple test pattern based on sync_index to verify different frames
-        switch(sync_index % 3) {
-            case 0:
-                clear_color = {{1.0f, 0.0f, 0.0f, 1.0f}}; // Red
-                break;
-            case 1:
-                clear_color = {{0.0f, 1.0f, 0.0f, 1.0f}}; // Green
-                break;
-            case 2:
-                clear_color = {{0.0f, 0.0f, 1.0f, 1.0f}}; // Blue
-                break;
-        }
+        VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}}; // Stable black
         
         VkImageSubresourceRange clear_range = {};
         clear_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -581,6 +626,63 @@ void CGSH_Vulkan_Libretro::CleanupLibretroImages()
     m_libretro_image_memory.clear();
     
     g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Cleaned up libretro images\n");
+}
+
+// SHADER MIXING FIX: Separate command pool management
+void CGSH_Vulkan_Libretro::CreateLibretroCommandPool()
+{
+    if (m_libretro_command_pool != VK_NULL_HANDLE) {
+        g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Libretro command pool already exists\n");
+        return;
+    }
+    
+    VkCommandPoolCreateInfo pool_info = {};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = 0; // Use same queue family as main context
+    
+    VkResult result = m_context->device.vkCreateCommandPool(m_context->device, &pool_info, nullptr, &m_libretro_command_pool);
+    if (result != VK_SUCCESS) {
+        g_log_cb(RETRO_LOG_ERROR, "[libretro ERROR] Failed to create libretro command pool: %d\n", result);
+        m_libretro_command_pool = VK_NULL_HANDLE;
+    } else {
+        g_log_cb(RETRO_LOG_INFO, "[libretro INFO] Created separate command pool for libretro operations\n");
+    }
+}
+
+void CGSH_Vulkan_Libretro::CleanupLibretroCommandPool()
+{
+    if (m_libretro_command_pool != VK_NULL_HANDLE) {
+        m_context->device.vkDestroyCommandPool(m_context->device, m_libretro_command_pool, nullptr);
+        m_libretro_command_pool = VK_NULL_HANDLE;
+        g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Cleaned up libretro command pool\n");
+    }
+}
+
+VkCommandBuffer CGSH_Vulkan_Libretro::AllocateLibretroCommandBuffer()
+{
+    if (m_libretro_command_pool == VK_NULL_HANDLE) {
+        CreateLibretroCommandPool();
+        if (m_libretro_command_pool == VK_NULL_HANDLE) {
+            g_log_cb(RETRO_LOG_ERROR, "[libretro ERROR] Cannot allocate command buffer - no command pool\n");
+            return VK_NULL_HANDLE;
+        }
+    }
+    
+    VkCommandBufferAllocateInfo alloc_info = {};
+    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc_info.commandPool = m_libretro_command_pool;
+    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc_info.commandBufferCount = 1;
+    
+    VkCommandBuffer cmd_buffer;
+    VkResult result = m_context->device.vkAllocateCommandBuffers(m_context->device, &alloc_info, &cmd_buffer);
+    if (result != VK_SUCCESS) {
+        g_log_cb(RETRO_LOG_ERROR, "[libretro ERROR] Failed to allocate libretro command buffer: %d\n", result);
+        return VK_NULL_HANDLE;
+    }
+    
+    return cmd_buffer;
 }
 
 
