@@ -164,8 +164,9 @@ void CGSH_Vulkan_Libretro::PresentBackbuffer()
     // Provide the image to RetroArch
     m_vk_iface->set_image(m_vk_iface->handle, &vk_image, 0, nullptr, VK_QUEUE_FAMILY_IGNORED);
     
-    // Notify RetroArch that a frame is ready
-    g_video_cb(RETRO_HW_FRAME_BUFFER_VALID, 640, 480, 0);
+    // FLICKER FIX: Use larger resolution for better visibility and stability
+    // This matches our VkImage size and reduces scaling artifacts
+    g_video_cb(RETRO_HW_FRAME_BUFFER_VALID, 1024, 768, 0);
     
     g_log_cb(RETRO_LOG_DEBUG, "[libretro DEBUG] Frame presented to RetroArch\n");
 }
@@ -232,8 +233,8 @@ VkImage CGSH_Vulkan_Libretro::GetOrCreateLibretroImage(uint32_t sync_index)
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
-    image_info.extent.width = 1024;  // Match Play!'s DRAW_AREA_SIZE to avoid scaling
-    image_info.extent.height = 1024; // This prevents flickering from format conversion
+    image_info.extent.width = 1024;  // FLICKER FIX: Use larger resolution for better visibility
+    image_info.extent.height = 768;  // This matches our reported resolution to RetroArch
     image_info.extent.depth = 1;
     image_info.mipLevels = 1;
     image_info.arrayLayers = 1;
@@ -442,7 +443,7 @@ void CGSH_Vulkan_Libretro::CopyPlayDrawImageToLibretro(VkImage dst_image, uint32
         copy_region.dstSubresource.baseArrayLayer = 0;
         copy_region.dstSubresource.layerCount = 1;
         copy_region.dstOffset = {0, 0, 0};
-        copy_region.extent = {1024, 1024, 1}; // DRAW_AREA_SIZE from Play!
+        copy_region.extent = {1024, 768, 1}; // FLICKER FIX: Extract 1024x768 region for proper aspect ratio
         
         m_context->device.vkCmdCopyImage(
             cmd_buffer,
@@ -540,11 +541,14 @@ void CGSH_Vulkan_Libretro::CopyPlayDrawImageToLibretro(VkImage dst_image, uint32
         return;
     }
     
-    // Wait for copy to complete with timeout to prevent hanging
-    result = m_context->device.vkWaitForFences(m_context->device, 1, &copy_fence, VK_TRUE, 16666666); // ~16ms timeout (60fps)
+    // FLICKER FIX: Wait for copy to complete with longer timeout for stability
+    result = m_context->device.vkWaitForFences(m_context->device, 1, &copy_fence, VK_TRUE, 100000000); // ~100ms timeout for stability
     if (result != VK_SUCCESS) {
         g_log_cb(RETRO_LOG_WARN, "[libretro WARN] Fence wait timed out or failed: %d\n", result);
     }
+    
+    // FLICKER FIX: Additional GPU idle wait to ensure frame is completely stable
+    m_context->device.vkQueueWaitIdle(m_context->queue);
     
     // Clean up fence
     m_context->device.vkDestroyFence(m_context->device, copy_fence, nullptr);
