@@ -712,6 +712,9 @@ PIPELINE CDrawMobile::CreateDrawPipeline(const PIPELINE_CAPS& caps)
 	case PIPELINE_PRIMITIVE_LINE:
 		inputAssemblyInfo.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
 		break;
+	case PIPELINE_PRIMITIVE_POINT:
+		inputAssemblyInfo.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+		break;
 	}
 
 	std::vector<VkVertexInputAttributeDescription> vertexAttributes;

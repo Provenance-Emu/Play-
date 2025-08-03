@@ -19,6 +19,9 @@ namespace GSH_Vulkan
 		void FlushVertices() override;
 		void FlushRenderPass() override;
 
+		// LIBRETRO: Add getter for draw image to enable image extraction
+		const Framework::Vulkan::CImage& GetDrawImage() const { return m_drawColorImage; }
+
 	private:
 		VkDescriptorSet PrepareDescriptorSet(VkDescriptorSetLayout, const DESCRIPTORSET_CAPS&);
 
