@@ -26,8 +26,81 @@ EXTRA_LDFLAGS="${EXTRA_LDFLAGS:-}"
 
 # iOS/tvOS 15+ optimizations
 CFLAGS_OPTIMIZATIONS=""
+CXXFLAGS_OPTIMIZATIONS=""
 
-CXXFLAGS_OPTIMIZATIONS=${CFLAGS_OPTIMIZATIONS}
+# FMV-optimized flags for Release builds
+setup_optimization_flags() {
+    local arch="arm64"
+    local ios_min_version="$IOS_DEPLOYMENT_TARGET"
+
+    if [[ "$CONFIGURATION" == "Release" ]]; then
+        log_info "Setting up FMV-optimized flags for Release build..."
+
+        # Core optimization flags
+        local base_flags="-arch ${arch} \
+-DIOS \
+-DTARGET_NO_NIXPROF \
+-DTARGET_OS_IOS=1 \
+-miphoneos-version-min=${ios_min_version} \
+-fdata-sections \
+-ffast-math \
+-ffunction-sections \
+-finline-functions \
+-flto=thin \
+-fno-strict-aliasing \
+-fomit-frame-pointer \
+-fpermissive \
+-ftree-vectorize \
+-funsafe-math-optimizations \
+-fvectorize \
+-march=armv8-a+simd+crc+crypto \
+-mcpu=apple-a10 \
+-mtune=apple-a14 \
+-Ofast \
+-fno-math-errno \
+-ffinite-math-only \
+-fno-signed-zeros \
+-fno-trapping-math \
+-freciprocal-math \
+-ffp-contract=fast \
+-funroll-loops \
+-DARM_NEON \
+-DHAVE_NEON \
+-DTARGET_IPHONE"
+
+        # Clang-compatible aggressive optimization flags (conservative set)
+        local aggressive_flags="-fno-stack-protector \
+-funroll-loops \
+-fvectorize \
+-fslp-vectorize \
+-fomit-frame-pointer \
+-finline-functions \
+-fstrict-aliasing \
+-fmerge-all-constants \
+-fno-common \
+-fdata-sections \
+-ffunction-sections \
+-falign-functions=32 \
+-falign-loops=32"
+
+        # Set C flags
+        CFLAGS_OPTIMIZATIONS="$base_flags"
+
+        # Set C++ flags (add C++17 standard)
+        CXXFLAGS_OPTIMIZATIONS="$base_flags -std=c++17"
+
+        # Add aggressive flags if enabled
+        if [[ "${AGGRESSIVE_FLAGS:-OFF}" == "ON" ]]; then
+            log_info "Adding aggressive optimization flags..."
+            CFLAGS_OPTIMIZATIONS="$CFLAGS_OPTIMIZATIONS $aggressive_flags"
+            CXXFLAGS_OPTIMIZATIONS="$CXXFLAGS_OPTIMIZATIONS $aggressive_flags"
+        fi
+
+        log_success "FMV-optimized flags configured for Release build"
+    else
+        log_info "Using default flags for $CONFIGURATION build"
+    fi
+}
 
 # iOS/tvOS deployment targets
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-16.4}"
@@ -75,6 +148,7 @@ OPTIONS:
     --extra-cflags FLAGS         Additional C compiler flags
     --extra-cxxflags FLAGS       Additional C++ compiler flags
     --extra-ldflags FLAGS        Additional linker flags
+    --aggressive-flags           Enable aggressive optimization flags for Release builds
     --clean                      Clean build directory before building
     -h, --help                   Show this help message
 
@@ -98,6 +172,12 @@ EXAMPLES:
 
     # Clean build for iOS without Vulkan
     $0 --clean --vulkan NO
+
+    # Release build with FMV-optimized flags
+    $0 --config Release
+
+    # Maximum performance Release build with aggressive optimizations
+    $0 --config Release --aggressive-flags
 
 EOF
 }
@@ -155,6 +235,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --clean)
             CLEAN_BUILD=YES
+            shift
+            ;;
+        --aggressive-flags)
+            AGGRESSIVE_FLAGS=ON
             shift
             ;;
         -h|--help)
@@ -411,6 +495,7 @@ main() {
     print_summary
 
     check_dependencies
+    setup_optimization_flags
     setup_build_dir
     configure_cmake
     build_project
