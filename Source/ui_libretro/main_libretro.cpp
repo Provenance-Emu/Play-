@@ -47,6 +47,9 @@ retro_input_state_t g_input_state_cb;
 retro_audio_sample_batch_t g_set_audio_sample_batch_cb;
 retro_log_printf_t g_log_cb = nullptr;
 
+// SIMPLE: Global Vulkan interface for simple initialization
+const struct retro_hw_render_interface_vulkan* g_vulkan_iface = nullptr;
+
 std::map<int, int> g_ds2_to_retro_btn_map;
 struct retro_hw_render_callback g_hw_render
 {
@@ -167,20 +170,10 @@ static void retro_vk_context_reset()
 		auto gsHandler = m_virtualMachine->GetGSHandler();
 		if (UseVulkanBackend()) {
 #ifdef VULKAN_LIBRETRO_SUPPORTED
-			auto vulkanHandler = static_cast<CGSH_Vulkan_Libretro*>(gsHandler);
-			try {
-				if (g_log_cb) {
-					g_log_cb(RETRO_LOG_INFO, "[VULKAN] Initializing existing Vulkan handler with interface\n");
-				}
-				vulkanHandler->InitializeWithInterface(vk_iface);
-				if (g_log_cb) {
-					g_log_cb(RETRO_LOG_INFO, "[VULKAN] Vulkan handler initialized successfully in context reset\n");
-				}
-			} catch (const std::exception& ex) {
-				if (g_log_cb) {
-					g_log_cb(RETRO_LOG_ERROR, "[VULKAN] Failed to initialize Vulkan handler with interface: %s\n", ex.what());
-				}
-				CLog::GetInstance().Warn(LOG_NAME, "Failed to initialize Vulkan handler with interface: %s\n", ex.what());
+			// SIMPLE: Store Vulkan interface globally for simple initialization
+			g_vulkan_iface = vk_iface;
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_INFO, "[SIMPLE] Vulkan interface stored for simple initialization\n");
 			}
 #else
 			if (g_log_cb) {
@@ -195,20 +188,10 @@ static void retro_vk_context_reset()
 		// Then initialize it with the interface
 		if (m_virtualMachine && m_virtualMachine->GetGSHandler() && UseVulkanBackend()) {
 #ifdef VULKAN_LIBRETRO_SUPPORTED
-			auto vulkanHandler = static_cast<CGSH_Vulkan_Libretro*>(m_virtualMachine->GetGSHandler());
-			try {
-				if (g_log_cb) {
-					g_log_cb(RETRO_LOG_INFO, "[VULKAN] Initializing new Vulkan handler with interface\n");
-				}
-				vulkanHandler->InitializeWithInterface(vk_iface);
-				if (g_log_cb) {
-					g_log_cb(RETRO_LOG_INFO, "[VULKAN] New Vulkan handler initialized successfully in context reset\n");
-				}
-			} catch (const std::exception& ex) {
-				if (g_log_cb) {
-					g_log_cb(RETRO_LOG_ERROR, "[VULKAN] Failed to initialize new Vulkan handler with interface: %s\n", ex.what());
-				}
-				CLog::GetInstance().Warn(LOG_NAME, "Failed to initialize new Vulkan handler with interface: %s\n", ex.what());
+			// SIMPLE: Store Vulkan interface globally for simple initialization
+			g_vulkan_iface = vk_iface;
+			if (g_log_cb) {
+				g_log_cb(RETRO_LOG_INFO, "[SIMPLE] Vulkan interface stored for new handler initialization\n");
 			}
 #else
 			if (g_log_cb) {

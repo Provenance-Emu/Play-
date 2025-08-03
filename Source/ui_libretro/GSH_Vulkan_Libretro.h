@@ -1,70 +1,63 @@
 #pragma once
 
 #include "gs/GSH_Vulkan/GSH_Vulkan.h"
+#include "ext/libretro.h"
 #include "libretro_vulkan.h"
 
 extern retro_video_refresh_t g_video_cb;
+extern retro_log_printf_t g_log_cb;
+extern const struct retro_hw_render_interface_vulkan* g_vulkan_iface;
 
-// Libretro Vulkan handler following iOS CGSH_VulkaniOS pattern
-// Proper Vulkan integration with RetroArch's Vulkan context
+// Simple Vulkan libretro handler following iOS CGSH_VulkaniOS pattern
+// Minimal interface - let base class handle everything
 class CGSH_Vulkan_Libretro : public CGSH_Vulkan
 {
 public:
-	CGSH_Vulkan_Libretro();
-	virtual ~CGSH_Vulkan_Libretro();
+    CGSH_Vulkan_Libretro();
+    virtual ~CGSH_Vulkan_Libretro();
 
-	// Libretro-specific initialization
-	void InitializeWithInterface(const struct retro_hw_render_interface_vulkan* vk_iface);
-	
-	// Factory function for libretro
-	static CGSHandler::FactoryFunction GetFactoryFunction();
-	
-	// Public methods called from main_libretro.cpp
-	void Reset();
-	void FlushMailBox();
-	
-	// PAUSE CRASH FIX: Pause/resume methods to prevent MoltenVK crashes
-	void SetPaused(bool paused) { m_is_paused = paused; }
-	bool IsPaused() const { return m_is_paused; }
-	
+    // Factory function for libretro
+    static CGSHandler::FactoryFunction GetFactoryFunction();
+
 protected:
-	// Override to indicate this is libretro mode
-	bool IsLibretroMode() const override { return true; }
-
-	// Following iOS pattern: Override only what's necessary for libretro
-	void PresentBackbuffer() override;
-	// FLICKER FIX: Overloaded version that takes sync_index to eliminate race conditions
-	void PresentBackbuffer(uint32_t sync_index);
-	void FlipImpl(const DISPLAY_INFO& displayInfo) override;
-	void SetPresentationParams(const CGSHandler::PRESENTATION_PARAMS& presentationParams) override;
-	void MarkNewFrame() override;
-	void SyncCLUT(const TEX0& tex0) override;
+    // Following iOS pattern: Override only what's necessary for libretro
+    void InitializeImpl() override;
+    void FlipImpl(const DISPLAY_INFO& displayInfo) override;
+    void PresentBackbuffer() override;
+    
+    // Critical: Override to tell base class we're in libretro mode
+    bool IsLibretroMode() const override { return true; }
 
 private:
-
-	// Store libretro Vulkan interface
-	const struct retro_hw_render_interface_vulkan* m_vk_iface = nullptr;
-	
-	// PAUSE CRASH FIX: Track pause state to prevent MoltenVK crashes
-	bool m_is_paused;
-    
-    // SHADER MIXING FIX: Separate command buffer pool for libretro operations
-    // This prevents interference with Play!'s active rendering pipeline
-    VkCommandPool m_libretro_command_pool = VK_NULL_HANDLE;
-    
-    // Libretro image management
-    std::map<uint32_t, VkImage> m_libretro_images;
-    std::map<uint32_t, VkImageView> m_libretro_image_views;
-    std::map<uint32_t, VkDeviceMemory> m_libretro_image_memory;
-    
-    // Helper methods for image management
+    // Play! content copying and image management methods
     VkImage GetOrCreateLibretroImage(uint32_t sync_index);
     VkImageView GetLibretroImageView(uint32_t sync_index);
-    void CopyPlayDrawImageToLibretro(VkImage dst_image, uint32_t sync_index);
+    VkFramebuffer GetOrCreateFramebuffer(uint32_t sync_index);
+    void CopyPlayRenderedContent(VkImage dst_image, uint32_t sync_index);
+    void CopyVkImageToLibretro(VkImage src_image, VkImage dst_image, uint32_t sync_index);
+    void RenderFallbackPattern(VkImage dst_image, uint32_t sync_index);
+    uint32_t FindMemoryType(uint32_t type_filter, VkMemoryPropertyFlags properties);
+    void CreateLibretroImages();
     void CleanupLibretroImages();
+
+    void CreateConversionPipeline();
+    void CleanupConversionPipeline();
     
-    // SHADER MIXING FIX: Command pool management for isolated operations
-    void CreateLibretroCommandPool();
-    void CleanupLibretroCommandPool();
-    VkCommandBuffer AllocateLibretroCommandBuffer();
+    // Libretro-specific members for image management
+    VkImage m_libretro_images[3];
+    std::vector<VkImageView> m_libretro_image_views;
+    std::vector<VkDeviceMemory> m_libretro_image_memories;
+
+    // Resources for converting Play!'s R32_UINT draw image to libretro's R8G8B8A8_UNORM
+    VkRenderPass m_conversionRenderPass = VK_NULL_HANDLE;
+    VkPipelineLayout m_conversionPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_conversionPipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_conversionDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_conversionDescriptorPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> m_conversionDescriptorSets;
+    std::vector<VkFramebuffer> m_conversionFramebuffers;
+
+    uint32_t m_frame_count;
+    uint32_t m_last_sync_index = -1;
+
 };

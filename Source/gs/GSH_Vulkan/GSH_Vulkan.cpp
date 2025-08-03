@@ -593,7 +593,7 @@ void CGSH_Vulkan::CreateMemoryBuffer()
 		delete[] m_memoryCache;
 		m_memoryCache = nullptr;
 	}
-	
+
 	assert(m_context->memoryBuffer.IsEmpty());
 	assert(!m_memoryCache);
 
@@ -632,7 +632,7 @@ void CGSH_Vulkan::CreateClutBuffer()
 	{
 		m_context->clutBuffer.Reset();
 	}
-	
+
 	assert(m_context->clutBuffer.IsEmpty());
 
 	static const uint32 clutBufferSize = CLUTENTRYCOUNT * sizeof(uint32) * CLUT_CACHE_SIZE;
