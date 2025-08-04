@@ -294,8 +294,12 @@ void CGSH_Vulkan::ResetImpl()
 	m_pendingPrimValue = 0;
 	m_regState.isValid = false;
 	memset(&m_clutStates, 0, sizeof(m_clutStates));
-	memset(m_memoryCache, 0, RAMSIZE);
-	WriteBackMemoryCache();
+	// LIBRETRO FIX: Only clear memory cache if it's been allocated
+	// ResetImpl() can be called before CreateMemoryBuffer() in some initialization sequences
+	if (m_memoryCache) {
+		memset(m_memoryCache, 0, RAMSIZE);
+		WriteBackMemoryCache();
+	}
 }
 
 void CGSH_Vulkan::SetPresentationParams(const CGSHandler::PRESENTATION_PARAMS& presentationParams)

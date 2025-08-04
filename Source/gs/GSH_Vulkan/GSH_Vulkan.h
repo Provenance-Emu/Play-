@@ -81,6 +81,9 @@ protected:
 	Framework::Vulkan::CInstance m_instance;
 	GSH_Vulkan::ContextPtr m_context;
 
+	// Protected getter for libretro to access presentation system
+	GSH_Vulkan::PresentPtr GetPresentSystem() const { return m_present; }
+
 private:
 	struct CLUTKEY : public convertible<uint64>
 	{

@@ -8,8 +8,8 @@ extern retro_video_refresh_t g_video_cb;
 extern retro_log_printf_t g_log_cb;
 extern const struct retro_hw_render_interface_vulkan* g_vulkan_iface;
 
-// Simple Vulkan libretro handler following iOS CGSH_VulkaniOS pattern
-// Minimal interface - let base class handle everything
+// DIRECT RENDERING: Play! renders directly to RetroArch's target VkImage
+// No copying, no format conversion, no intermediate images
 class CGSH_Vulkan_Libretro : public CGSH_Vulkan
 {
 public:
@@ -19,45 +19,37 @@ public:
     // Factory function for libretro
     static CGSHandler::FactoryFunction GetFactoryFunction();
 
-protected:
-    // Following iOS pattern: Override only what's necessary for libretro
     void InitializeImpl() override;
+    void ReleaseImpl() override;
     void FlipImpl(const DISPLAY_INFO& displayInfo) override;
     void PresentBackbuffer() override;
     
-    // Critical: Override to tell base class we're in libretro mode
+    // CRITICAL: Override to tell base class we're in libretro mode
     bool IsLibretroMode() const override { return true; }
 
 private:
-    // Play! content copying and image management methods
-    VkImage GetOrCreateLibretroImage(uint32_t sync_index);
-    VkImageView GetLibretroImageView(uint32_t sync_index);
-    VkFramebuffer GetOrCreateFramebuffer(uint32_t sync_index);
-    void CopyPlayRenderedContent(VkImage dst_image, uint32_t sync_index);
-    void CopyVkImageToLibretro(VkImage src_image, VkImage dst_image, uint32_t sync_index);
-    void RenderFallbackPattern(VkImage dst_image, uint32_t sync_index);
-    uint32_t FindMemoryType(uint32_t type_filter, VkMemoryPropertyFlags properties);
-    void CreateLibretroImages();
-    void CleanupLibretroImages();
-
-    void CreateConversionPipeline();
-    void CleanupConversionPipeline();
+    // DIRECT RENDERING: Create VkImage that Play! renders to, then provide to RetroArch
+    void CreateDirectRenderTarget();
+    void SetupPlayRenderTarget();
+    void CopyPlayRenderedContentToLibretroImage();
+    void ProvideRenderedImageToRetroArch();
+    void SetupVulkanContext();
     
-    // Libretro-specific members for image management
-    VkImage m_libretro_images[3];
-    std::vector<VkImageView> m_libretro_image_views;
-    std::vector<VkDeviceMemory> m_libretro_image_memories;
-
-    // Resources for converting Play!'s R32_UINT draw image to libretro's R8G8B8A8_UNORM
-    VkRenderPass m_conversionRenderPass = VK_NULL_HANDLE;
-    VkPipelineLayout m_conversionPipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_conversionPipeline = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_conversionDescriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool m_conversionDescriptorPool = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> m_conversionDescriptorSets;
-    std::vector<VkFramebuffer> m_conversionFramebuffers;
-
-    uint32_t m_frame_count;
-    uint32_t m_last_sync_index = -1;
-
+    // Direct rendering target that Play! renders to (in RetroArch's expected format)
+    VkImage m_direct_render_image = VK_NULL_HANDLE;
+    VkDeviceMemory m_direct_render_memory = VK_NULL_HANDLE;
+    VkImageView m_direct_render_view = VK_NULL_HANDLE;
+    
+    // libretro image to provide to RetroArch
+    retro_vulkan_image m_libretro_image = {};
+    
+    // CRITICAL: Store libretro Vulkan instance to keep it alive for annotations
+    std::unique_ptr<Framework::Vulkan::CInstance> m_libretro_instance;
+    
+    // Deferred initialization flag
+    bool m_vulkan_setup_deferred = false;
+    
+    uint32_t m_frame_count = 0;
+    static constexpr uint32_t RENDER_WIDTH = 640;
+    static constexpr uint32_t RENDER_HEIGHT = 480;
 };
